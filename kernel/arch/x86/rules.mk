@@ -67,6 +67,7 @@ MODULE_SRCS += \
 	$(LOCAL_DIR)/registers.cpp \
 	$(LOCAL_DIR)/start.S \
 	$(LOCAL_DIR)/syscall.S \
+	$(LOCAL_DIR)/thermal.cpp \
 	$(LOCAL_DIR)/thread.cpp \
 	$(LOCAL_DIR)/timer_freq.cpp \
 	$(LOCAL_DIR)/tsc.cpp \

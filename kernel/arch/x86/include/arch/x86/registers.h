@@ -61,6 +61,27 @@
 #define X86_MSR_IA32_HWP_CAPABILITIES   0x00000771 /* HWP performance range enumeration */
 #define X86_MSR_IA32_HWP_REQUEST        0x00000774 /* power manage control hints */
 #define X86_CR4_PSE                     0xffffffef /* Disabling PSE bit in the CR4 */
+#define X86_MSR_IA32_PERF_CTL           0x00000199 /* performance control */
+#define X86_MSR_IA32_CLOCK_MODULATION   0x0000019a /* clock modulation control */
+#define X86_MSR_THERM2_CTL              0x0000019d /* TCC mode */
+#define X86_MSR_IA32_THERM_STATUS       0x0000019c /* Thermal status */
+#define X86_MSR_IA32_THERM_INTERRUPT     0x0000019b
+#define X86_MSR_IA32_PACKAGE_THERM_STATUS    0x00001b1
+#define X86_MSR_IA32_PACKAGE_THERM_INTERRUPT 0x00001b2
+#define X86_MSR_IA32_PKG_HDC_CTL        0x00000db0
+
+#define X86_MSR_PKG_ENERGY_STATUS       0x00000611
+#define X86_MSR_PKG_PERF_STATUS         0x00000613
+#define X86_MSR_DRAM_POWER_LIMIT        0x00000618
+#define X86_MSR_DRAM_ENERGY_STATUS      0x00000619
+#define X86_MSR_DRAM_PERF_STATUS        0x0000061b
+#define X86_MSR_DRAM_POWER_INFO         0x0000061c
+#define X86_MSR_PP0_ENERGY_STATUS       0x00000639
+#define X86_MSR_PP0_POWER_LIMIT         0x00000640
+#define X86_MSR_PP0_POLICY              0x0000063a
+#define X86_MSR_PP1_ENERGY_STATUS       0x00000640
+#define X86_MSR_PP1_POWER_LIMIT         0x00000641
+#define X86_MSR_PP1_POLICY              0x00000642
 
 // Non-architectural MSRs
 #define X86_MSR_RAPL_POWER_UNIT         0x00000606 /* RAPL unit multipliers */
