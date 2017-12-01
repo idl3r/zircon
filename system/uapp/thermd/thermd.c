@@ -38,6 +38,7 @@ static zx_status_t get_root_resource(zx_handle_t* root_resource) {
 }
 
 static zx_status_t set_pl1(uint32_t target) {
+#if 0
     zx_system_powerctl_arg_t arg = {
         .x86_power_limit = {
             .power_limit = target,
@@ -52,6 +53,7 @@ static zx_status_t set_pl1(uint32_t target) {
         return -1;
     }
     pl1_mw = target;
+#endif
     return ZX_OK;
 }
 
