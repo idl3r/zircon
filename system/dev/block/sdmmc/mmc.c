@@ -130,9 +130,7 @@ static zx_status_t mmc_set_bus_width(
 
     if (sdmmc_width != sdmmc->bus_width) {
         // Switch the host to the new bus width
-        uint32_t new_bus_width = sdmmc_width;
-        if ((st = device_ioctl(sdmmc->host_zxdev, IOCTL_SDMMC_SET_BUS_WIDTH,
-                        &new_bus_width, sizeof(new_bus_width), NULL, 0, NULL)) != ZX_OK) {
+        if ((st = sdmmc_set_bus_width(&sdmmc->host, sdmmc_width)) != ZX_OK) {
             zxlogf(ERROR, "mmc: failed to switch the host bus width to %d, retcode = %d\n",
                     sdmmc_width, st);
             return ZX_ERR_INTERNAL;
@@ -156,30 +154,38 @@ static uint8_t mmc_select_bus_width(sdmmc_t* sdmmc, iotxn_t* txn) {
     return sdmmc->bus_width;
 }
 
-static zx_status_t mmc_switch_timing(sdmmc_t* sdmmc, iotxn_t* txn, uint8_t new_timing) {
+static zx_status_t mmc_switch_timing(sdmmc_t* sdmmc, iotxn_t* txn, sdmmc_timing_t new_timing) {
     // Switch the device timing
-    uint8_t ext_csd_timing[] = {
-        MMC_EXT_CSD_HS_TIMING_LEGACY,
-        MMC_EXT_CSD_HS_TIMING_HS,
-        MMC_EXT_CSD_HS_TIMING_HS,  // sdhci has a different timing constant for HSDDR vs HS
-        MMC_EXT_CSD_HS_TIMING_HS200,
-        MMC_EXT_CSD_HS_TIMING_HS400
-    };
-    if (new_timing > sizeof(ext_csd_timing)/sizeof(ext_csd_timing[0])) {
-        zxlogf(ERROR, "mmc: invalid arg %d\n", new_timing);
+    uint8_t ext_csd_timing;
+    switch (new_timing) {
+    case SDMMC_TIMING_LEGACY:
+        ext_csd_timing = MMC_EXT_CSD_HS_TIMING_LEGACY;
+        break;
+    case SDMMC_TIMING_HS:
+        ext_csd_timing = MMC_EXT_CSD_HS_TIMING_HS;
+        break;
+    case SDMMC_TIMING_HSDDR:
+        // sdhci has a different timing constant for HSDDR vs HS
+        ext_csd_timing = MMC_EXT_CSD_HS_TIMING_HS;
+        break;
+    case SDMMC_TIMING_HS200:
+        ext_csd_timing = MMC_EXT_CSD_HS_TIMING_HS200;
+        break;
+    case SDMMC_TIMING_HS400:
+        ext_csd_timing = MMC_EXT_CSD_HS_TIMING_HS400;
+        break;
+    default:
         return ZX_ERR_INVALID_ARGS;
-    }
+    };
 
-    zx_status_t st = mmc_switch(sdmmc, txn, MMC_EXT_CSD_HS_TIMING, ext_csd_timing[new_timing]);
+    zx_status_t st = mmc_switch(sdmmc, txn, MMC_EXT_CSD_HS_TIMING, ext_csd_timing);
     if (st != ZX_OK) {
         zxlogf(ERROR, "mmc: failed to switch device timing to %d\n", new_timing);
         return st;
     }
 
     // Switch the host timing
-    uint32_t arg = new_timing;
-    if ((st = device_ioctl(sdmmc->host_zxdev, IOCTL_SDMMC_SET_TIMING,
-                    &arg, sizeof(arg), NULL, 0, NULL)) != ZX_OK) {
+    if ((st = sdmmc_set_timing(&sdmmc->host, new_timing)) != ZX_OK) {
         zxlogf(ERROR, "mmc: failed to switch host timing to %d\n", new_timing);
         return st;
     }
@@ -190,8 +196,7 @@ static zx_status_t mmc_switch_timing(sdmmc_t* sdmmc, iotxn_t* txn, uint8_t new_t
 
 static zx_status_t mmc_switch_freq(sdmmc_t* sdmmc, uint32_t new_freq) {
     zx_status_t st;
-    if ((st = device_ioctl(sdmmc->host_zxdev, IOCTL_SDMMC_SET_BUS_FREQ,
-                    &new_freq, sizeof(new_freq), NULL, 0, NULL)) != ZX_OK) {
+    if ((st = sdmmc_set_bus_freq(&sdmmc->host, new_freq)) != ZX_OK) {
         zxlogf(ERROR, "mmc: failed to set host bus frequency, retcode = %d\n", st);
         return st;
     }
@@ -332,14 +337,13 @@ zx_status_t sdmmc_probe_mmc(sdmmc_t* sdmmc, iotxn_t* setup_txn) {
 
     sdmmc->type = SDMMC_TYPE_MMC;
     sdmmc->bus_width = SDMMC_BUS_WIDTH_1;
-    sdmmc->signal_voltage = SDMMC_SIGNAL_VOLTAGE_330; // TODO verify with host
+    sdmmc->signal_voltage = SDMMC_VOLTAGE_330; // TODO verify with host
 
     // Switch to high-speed timing
     if (mmc_supports_hs(sdmmc) || mmc_supports_hsddr(sdmmc) || mmc_supports_hs200(sdmmc)) {
         // Switch to 1.8V signal voltage
-        const uint32_t new_voltage = SDMMC_SIGNAL_VOLTAGE_180;
-        if ((st = device_ioctl(sdmmc->host_zxdev, IOCTL_SDMMC_SET_SIGNAL_VOLTAGE, &new_voltage,
-                               sizeof(new_voltage), NULL, 0, NULL)) != ZX_OK) {
+        sdmmc_voltage_t new_voltage = SDMMC_VOLTAGE_180;
+        if ((st = sdmmc_set_signal_voltage(&sdmmc->host, new_voltage)) != ZX_OK) {
             zxlogf(ERROR, "mmc: failed to switch to 1.8V signalling, retcode = %d\n", st);
             goto err;
         }
@@ -356,8 +360,7 @@ zx_status_t sdmmc_probe_mmc(sdmmc_t* sdmmc, iotxn_t* setup_txn) {
                 goto err;
             }
 
-            if ((st = device_ioctl(sdmmc->host_zxdev, IOCTL_SDMMC_MMC_TUNING,
-                            NULL, 0, NULL, 0, NULL)) != ZX_OK) {
+            if ((st = sdmmc_perform_tuning(&sdmmc->host)) != ZX_OK) {
                 zxlogf(ERROR, "mmc: tuning failed %d\n", st);
                 goto err;
             }

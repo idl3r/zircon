@@ -26,10 +26,6 @@
 
 #include "sdmmc.h"
 
-// TODO:
-// * close ended transfers
-// * HS200/HS400
-
 // Various transfer states that the card can be in.
 #define SDMMC_STATE_TRAN 0x4
 #define SDMMC_STATE_RECV 0x5
@@ -288,17 +284,11 @@ out:
 }
 
 static int sdmmc_worker_thread(void* arg) {
+    zx_status_t st = ZX_OK;
     sdmmc_t* sdmmc = (sdmmc_t*)arg;
 
-    zx_status_t st = device_ioctl(sdmmc->host_zxdev, IOCTL_SDMMC_GET_MAX_TRANSFER_SIZE,
-                                  NULL, 0,
-                                  &sdmmc->max_transfer_size, sizeof(sdmmc->max_transfer_size),
-                                  NULL);
-    if (st != ZX_OK) {
-        zxlogf(ERROR, "sdmmc: failed to get max transfer size, rc = %d\n", st);
-        device_remove(sdmmc->zxdev);
-        return st;
-    }
+    // TODO: get max transfer size from host
+    sdmmc->max_transfer_size = 32 * 1024 * 1024; // 32M
 
     iotxn_t* setup_txn = NULL;
     // Allocate a single iotxn that we use to bootstrap the card with.
@@ -310,7 +300,7 @@ static int sdmmc_worker_thread(void* arg) {
     }
 
     // Reset the card.
-    device_ioctl(sdmmc->host_zxdev, IOCTL_SDMMC_HW_RESET, NULL, 0, NULL, 0, NULL);
+    sdmmc_hw_reset(&sdmmc->host);
 
     // No matter what state the card is in, issuing the GO_IDLE_STATE command will
     // put the card into the idle state.
@@ -371,6 +361,12 @@ static zx_status_t sdmmc_bind(void* ctx, zx_device_t* dev) {
     if (!sdmmc) {
         zxlogf(ERROR, "sdmmc: no memory to allocate sdmmc device!\n");
         return ZX_ERR_NO_MEMORY;
+    }
+
+    if (device_get_protocol(dev, ZX_PROTOCOL_SDMMC, &sdmmc->host)) {
+        zxlogf(ERROR, "sdmmc: failed to get sdmmc protocol\n");
+        free(sdmmc);
+        return ZX_ERR_NOT_SUPPORTED;
     }
 
     sdmmc->host_zxdev = dev;

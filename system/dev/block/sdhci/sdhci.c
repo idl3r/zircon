@@ -68,8 +68,6 @@ static_assert(sizeof(sdhci_adma64_desc_t) == 12, "unexpected ADMA2 descriptor si
 typedef struct sdhci_device {
     // Interrupts mapped here.
     zx_handle_t irq_handle;
-    // Used to signal that a command has completed.
-    completion_t irq_completion;
 
     // Memory mapped device registers.
     volatile sdhci_regs_t* regs;
@@ -88,12 +86,16 @@ typedef struct sdhci_device {
     // Held when a command or action is in progress.
     mtx_t mtx;
 
-    // Current iotxn in flight
-    iotxn_t* pending;
-    // Completed iotxn
-    iotxn_t* completed;
-    // Used to signal that the pending iotxn is completed
-    completion_t pending_completion;
+    // Current request
+    sdmmc_request_t* req;
+
+    // controller capabilities
+    uint64_t caps;
+#define SDHCI_CAP_BUS_WIDTH_8 (1 << 0)
+#define SDHCI_CAP_ADMA2       (1 << 1)
+#define SDHCI_CAP_64BIT       (1 << 2)
+#define SDHCI_CAP_VOLTAGE_330 (1 << 3)
+#define SDHCI_CAP_VOLTAGE_300 (1 << 4)
 
     // controller specific quirks
     uint64_t quirks;
@@ -128,8 +130,8 @@ static const uint32_t normal_interrupts = (
 );
 
 static bool sdhci_supports_adma2_64bit(sdhci_device_t* dev) {
-    return (dev->regs->caps0 & SDHCI_CORECFG_ADMA2_SUPPORT) &&
-           (dev->regs->caps0 & SDHCI_CORECFG_64BIT_SUPPORT) &&
+    return (dev->caps & SDHCI_CAP_ADMA2) &&
+           (dev->caps & SDHCI_CAP_64BIT) &&
            !(dev->quirks & SDHCI_QUIRK_NO_DMA);
 }
 
@@ -147,45 +149,47 @@ static zx_status_t sdhci_wait_for_reset(sdhci_device_t* dev, const uint32_t mask
     return ZX_OK;
 }
 
-static void sdhci_complete_pending_locked(sdhci_device_t* dev, zx_status_t status, uint64_t actual) {
+static void sdhci_complete_request_locked(sdhci_device_t* dev, zx_status_t status,
+                                          uint64_t actual) {
     // Disable irqs when no pending iotxn
     dev->regs->irqen = 0;
 
-    dev->completed = dev->pending;
-    dev->completed->status = status;
-    dev->completed->actual = actual;
-    dev->pending = NULL;
-
-    completion_signal(&dev->pending_completion);
+    sdmmc_request_t* req = dev->req;
+    iotxn_t* txn = req->txn;
+    if (txn) {
+        txn->status = status;
+        txn->actual = actual;
+    }
+    dev->req = NULL;
+    req->completion(req, req->cookie);
 }
 
 static void sdhci_cmd_stage_complete_locked(sdhci_device_t* dev) {
-    if (!dev->pending) {
+    if (!dev->req) {
         zxlogf(TRACE, "sdhci: spurious CMD_CPLT interrupt!\n");
         return;
     }
 
-    iotxn_t* txn = dev->pending;
+    sdmmc_request_t* req = dev->req;
     volatile struct sdhci_regs* regs = dev->regs;
-    sdmmc_protocol_data_t* pdata = iotxn_pdata(txn, sdmmc_protocol_data_t);
-    uint32_t cmd = pdata->cmd;
+    uint32_t cmd = req->cmd;
 
     // Read the response data.
     if (cmd & SDMMC_RESP_LEN_136) {
         if (dev->quirks & SDHCI_QUIRK_STRIP_RESPONSE_CRC) {
-            pdata->response[0] = (regs->resp3 << 8) | ((regs->resp2 >> 24) & 0xFF);
-            pdata->response[1] = (regs->resp2 << 8) | ((regs->resp1 >> 24) & 0xFF);
-            pdata->response[2] = (regs->resp1 << 8) | ((regs->resp0 >> 24) & 0xFF);
-            pdata->response[3] = (regs->resp0 << 8);
+            req->response[0] = (regs->resp3 << 8) | ((regs->resp2 >> 24) & 0xFF);
+            req->response[1] = (regs->resp2 << 8) | ((regs->resp1 >> 24) & 0xFF);
+            req->response[2] = (regs->resp1 << 8) | ((regs->resp0 >> 24) & 0xFF);
+            req->response[3] = (regs->resp0 << 8);
         } else {
-            pdata->response[0] = regs->resp0;
-            pdata->response[1] = regs->resp1;
-            pdata->response[2] = regs->resp2;
-            pdata->response[3] = regs->resp3;
+            req->response[0] = regs->resp0;
+            req->response[1] = regs->resp1;
+            req->response[2] = regs->resp2;
+            req->response[3] = regs->resp3;
         }
     } else if (cmd & (SDMMC_RESP_LEN_48 | SDMMC_RESP_LEN_48B)) {
-        pdata->response[0] = regs->resp0;
-        pdata->response[1] = regs->resp1;
+        req->response[0] = regs->resp0;
+        req->response[1] = regs->resp1;
     }
 
     // If this command has a data phase and we're not using DMA, transfer the data
@@ -205,66 +209,65 @@ static void sdhci_cmd_stage_complete_locked(sdhci_device_t* dev) {
             }
         }
     } else {
-        sdhci_complete_pending_locked(dev, ZX_OK, 0);
+        sdhci_complete_request_locked(dev, ZX_OK, 0);
     }
 }
 
 static void sdhci_data_stage_read_ready_locked(sdhci_device_t* dev) {
-    if (!dev->pending) {
+    if (!dev->req) {
         zxlogf(TRACE, "sdhci: spurious BUFF_READ_READY interrupt!\n");
         return;
     }
 
-    iotxn_t* txn = dev->pending;
-    sdmmc_protocol_data_t* pdata = iotxn_pdata(txn, sdmmc_protocol_data_t);
+    sdmmc_request_t* req = dev->req;
 
     // MMC_SEND_TUNING_BLOCK has a block length but we never actually see the data
-    if (pdata->cmd != MMC_SEND_TUNING_BLOCK) {
+    if (req->cmd != MMC_SEND_TUNING_BLOCK) {
         // Sequentially read each block.
-        for (size_t byteid = 0; byteid < pdata->blocksize; byteid += 4) {
+        for (size_t byteid = 0; byteid < req->blocksize; byteid += 4) {
             uint32_t wrd;
-            const size_t offset = pdata->blockid * pdata->blocksize + byteid;
+            const size_t offset = req->blockid * req->blocksize + byteid;
             wrd = dev->regs->data;
             iotxn_copyto(txn, &wrd, sizeof(wrd), offset);
             txn->actual += sizeof(wrd);
         }
-        pdata->blockid += 1;
+        req->blockid += 1;
     }
 
-    if (pdata->blockid == pdata->blockcount) {
-        sdhci_complete_pending_locked(dev, ZX_OK, txn->actual);
+    if (req->blockid == req->blockcount) {
+        sdhci_complete_request_locked(dev, ZX_OK, txn->actual);
     }
 }
 
 static void sdhci_data_stage_write_ready_locked(sdhci_device_t* dev) {
-    if (!dev->pending) {
+    if (!dev->req) {
         zxlogf(TRACE, "sdhci: spurious BUFF_WRITE_READY interrupt!\n");
         return;
     }
 
-    iotxn_t* txn = dev->pending;
-    sdmmc_protocol_data_t* pdata = iotxn_pdata(txn, sdmmc_protocol_data_t);
+    sdmmc_request_t* req = dev->req;
+    iotxn_t* txn = req->txn;
 
     // Sequentially write each block.
-    for (size_t byteid = 0; byteid < pdata->blocksize; byteid += 4) {
+    for (size_t byteid = 0; byteid < req->blocksize; byteid += 4) {
         uint32_t wrd;
-        const size_t offset = pdata->blockid * pdata->blocksize + byteid;
+        const size_t offset = req->blockid * req->blocksize + byteid;
         iotxn_copyfrom(txn, &wrd, sizeof(wrd), offset);
         dev->regs->data = wrd;
         txn->actual += sizeof(wrd);
     }
-    pdata->blockid += 1;
-    if (pdata->blockid == pdata->blockcount) {
-        sdhci_complete_pending_locked(dev, ZX_OK, txn->actual);
+    req->blockid += 1;
+    if (req->blockid == req->blockcount) {
+        sdhci_complete_request_locked(dev, ZX_OK, txn->actual);
     }
 }
 
 static void sdhci_transfer_complete_locked(sdhci_device_t* dev) {
-    if (!dev->pending) {
+    if (!dev->req) {
         zxlogf(TRACE, "sdhci: spurious XFER_CPLT interrupt!\n");
         return;
     }
-    sdhci_complete_pending_locked(dev, ZX_OK, dev->pending->length);
+    sdhci_complete_request_locked(dev, ZX_OK, dev->pending->length);
 }
 
 static void sdhci_error_recovery_locked(sdhci_device_t* dev) {
@@ -278,7 +281,7 @@ static void sdhci_error_recovery_locked(sdhci_device_t* dev) {
 
     // Complete any pending txn with error status
     if (dev->pending != NULL) {
-        sdhci_complete_pending_locked(dev, ZX_ERR_IO, 0);
+        sdhci_complete_request_locked(dev, ZX_ERR_IO, 0);
     }
 }
 
@@ -348,50 +351,42 @@ static int sdhci_irq_thread(void *arg) {
     return 0;
 }
 
-static zx_status_t sdhci_start_txn_locked(sdhci_device_t* dev, iotxn_t* txn) {
-    sdmmc_protocol_data_t* pdata = iotxn_pdata(txn, sdmmc_protocol_data_t);
+static zx_status_t sdhci_start_req_locked(sdhci_device_t* dev, sdmmc_request_t* req) {
+    dev->req = req;
 
     volatile struct sdhci_regs* regs = dev->regs;
-    const uint32_t arg = pdata->arg;
-    const uint16_t blkcnt = pdata->blockcount;
-    const uint16_t blksiz = pdata->blocksize;
-    uint32_t cmd = pdata->cmd;
+    const uint32_t arg = req->arg;
+    const uint16_t blkcnt = req->blockcount;
+    const uint16_t blksiz = req->blocksize;
+    uint32_t cmd = req->cmd;
+    // This command has a data phase?
+    bool has_data = cmd & SDMMC_RESP_DATA_PRESENT;
+    iotxn_t* txn = req->txn;
+
+    if (has_data && !txn) {
+        return ZX_ERR_INVALID_ARGS;
+    }
 
     zx_status_t st = ZX_OK;
 
-    zxlogf(TRACE, "sdhci: start_txn cmd=0x%08x (data %d) blkcnt %u blksiz %u length %"
-            PRIu64 "\n",
-            cmd, !!(cmd & SDMMC_RESP_DATA_PRESENT), blkcnt, blksiz, txn->length);
-
-    pdata->blockid = 0;
-    txn->actual = 0;
-
-    // This command has a data phase?
-    bool has_data = cmd & SDMMC_RESP_DATA_PRESENT;
-
-    if (has_data && txn->length == 0) {
-        // Empty txn; return immediately
-        dev->completed = dev->pending;
-        dev->completed->status = ZX_OK;
-        dev->completed->actual = 0;
-        dev->pending = NULL;
-        completion_signal(&dev->pending_completion);
-        return ZX_OK;
-    }
+    zxlogf(TRACE, "sdhci: start_req cmd=0x%08x (data %d) blkcnt %u blksiz %u length %"
+                  PRIu64 "\n",
+                  cmd, has_data, blkcnt, blksiz, txn->length);
 
     // Every command requires that the Command Inhibit is unset.
     uint32_t inhibit_mask = SDHCI_STATE_CMD_INHIBIT;
 
     // Busy type commands must also wait for the DATA Inhibit to be 0 UNLESS
     // it's an abort command which can be issued with the data lines active.
-    if (((cmd & SDMMC_RESP_LEN_48B) == SDMMC_RESP_LEN_48B) && ((cmd & SDMMC_CMD_TYPE_ABORT) == 0)) {
+    if (((cmd & SDMMC_RESP_LEN_48B) == SDMMC_RESP_LEN_48B) &&
+        ((cmd & SDMMC_CMD_TYPE_ABORT) == 0)) {
         inhibit_mask |= SDHCI_STATE_DAT_INHIBIT;
     }
 
-    // Wait for the inhibit masks from above to become 0 before issuing the
-    // command.
-    while (regs->state & inhibit_mask)
+    // Wait for the inhibit masks from above to become 0 before issuing the command.
+    while (regs->state & inhibit_mask) {
         zx_nanosleep(zx_deadline_after(ZX_MSEC(1)));
+    }
 
     bool use_dma = sdhci_supports_adma2_64bit(dev);
     if (has_data) {
@@ -492,71 +487,112 @@ err:
     return st;
 }
 
-static void sdhci_iotxn_queue(void* ctx, iotxn_t* txn) {
-    // Ensure that the offset is some multiple of the block size, we don't allow
-    // writes that are partway into a block.
-    if (txn->offset % SDHC_BLOCK_SIZE) {
-        printf("sdhci: iotxn offset not aligned to block boundary, "
-               "offset =%" PRIu64", block size = %d\n", txn->offset, SDHC_BLOCK_SIZE);
-        iotxn_complete(txn, ZX_ERR_INVALID_ARGS, 0);
-        return;
+static zx_status_t sdhci_set_signal_voltage(void* ctx, sdmmc_voltage_t voltage) {
+    if (voltage >= SDMMC_VOLTAGE_MAX) {
+        return ZX_ERR_INVALID_ARGS;
     }
 
-    // Ensure that the length of the write is some multiple of the block size.
-    if (txn->length % SDHC_BLOCK_SIZE) {
-        printf("sdhci: iotxn length not aligned to block boundary, "
-               "offset =%" PRIu64", block size = %d\n", txn->length, SDHC_BLOCK_SIZE);
-        iotxn_complete(txn, ZX_ERR_INVALID_ARGS, 0);
-        return;
-    }
-
+    zx_status_t st = ZX_OK;
     sdhci_device_t* dev = ctx;
+    volatile struct sdhci_regs* regs = dev->regs;
 
-    // One at a time for now
     mtx_lock(&dev->mtx);
-    if (dev->pending != NULL) {
-        mtx_unlock(&dev->mtx);
-        printf("sdhci: only one outstanding iotxn is allowed\n");
-        iotxn_complete(txn, ZX_ERR_NO_RESOURCES, 0);
-        return;
-    }
 
-    // Start the txn
-    dev->pending = txn;
-    zx_status_t st;
-    if ((st = sdhci_start_txn_locked(dev, txn)) != ZX_OK) {
-        dev->pending = NULL;
-        mtx_unlock(&dev->mtx);
-        iotxn_complete(txn, ZX_ERR_NO_RESOURCES, 0);
-        return;
-    }
+    // Disable the SD clock before messing with the voltage.
+    regs->ctrl1 &= ~SDHCI_SD_CLOCK_ENABLE;
+    zx_nanosleep(zx_deadline_after(ZX_MSEC(2)));
 
-    mtx_unlock(&dev->mtx);
-
-    // Wait for completion
-    do {
-        completion_wait(&dev->pending_completion, ZX_TIME_INFINITE);
-        completion_reset(&dev->pending_completion);
-
-        mtx_lock(&dev->mtx);
-
-        if (!dev->completed || (dev->completed != txn)) {
-            printf("sdhci: spurious completion\n");
-            mtx_unlock(&dev->mtx);
-            continue;
-
-        } else {
-            dev->completed = NULL;
-            mtx_unlock(&dev->mtx);
-            break;
+    if (voltage == SDMMC_VOLTAGE_180) {
+        regs->ctrl2 |= SDHCI_HOSTCTRL2_1P8V_SIGNALLING_ENA;
+        // 1.8V regulator out should be stable within 5ms
+        zx_nanosleep(zx_deadline_after(ZX_MSEC(5)));
+        if (driver_get_log_flags() & DDK_LOG_TRACE) {
+            if (!(regs->ctrl2 & SDHCI_HOSTCTRL2_1P8V_SIGNALLING_ENA)) {
+                zxlogf(TRACE, "sdhci: 1.8V regulator output did not become stable\n");
+                st = ZX_ERR_INTERNAL;
+                goto unlock;
+            }
         }
-    } while (true);
+    } else {
+        regs->ctrl2 &= ~SDHCI_HOSTCTRL2_1P8V_SIGNALLING_ENA;
+        // 3.3V regulator out should be stable within 5ms
+        zx_nanosleep(zx_deadline_after(ZX_MSEC(5)));
+        if (driver_get_log_flags() & DDK_LOG_TRACE) {
+            if (regs->ctrl2 & SDHCI_HOSTCTRL2_1P8V_SIGNALLING_ENA) {
+                zxlogf(TRACE, "sdhci: 3.3V regulator output did not become stable\n");
+                st = ZX_ERR_INTERNAL;
+                goto unlock;
+            }
+        }
+    }
 
-    iotxn_complete(txn, txn->status, txn->actual);
+    // Make sure our changes are acknolwedged.
+    uint32_t expected_mask = SDHCI_PWRCTRL_SD_BUS_POWER;
+    if (voltage == SDMMC_VOLTAGE_180) {
+        expected_mask |= SDHCI_PWRCTRL_SD_BUS_VOLTAGE_1P8V;
+    } else {
+        expected_mask |= SDHCI_PWRCTRL_SD_BUS_VOLTAGE_3P3V;
+    }
+    if ((regs->ctrl0 & expected_mask) != expected_mask) {
+        zxlogf(TRACE, "sdhci: after voltage switch ctrl0=0x%08x, expected=0x%08x\n",
+                regs->ctrl0, expected_mask);
+        st = ZX_ERR_INTERNAL;
+        goto unlock;
+    }
+
+    // Turn the clock back on
+    regs->ctrl1 |= SDHCI_SD_CLOCK_ENABLE;
+    zx_nanosleep(zx_deadline_after(ZX_MSEC(2)));
+
+unlock:
+    mtx_unlock(&dev->mtx);
+    return st;
 }
 
-static zx_status_t sdhci_set_bus_frequency(sdhci_device_t* dev, uint32_t target_freq) {
-    const uint32_t divider = get_clock_divider(dev->base_clock, target_freq);
+static zx_status_t sdhci_set_bus_width(void* ctx, uint32_t bus_width) {
+    if (bus_width >= SDMMC_BUS_WIDTH_MAX) {
+        return ZX_ERR_INVALID_ARGS;
+    }
+
+    zx_status_t st = ZX_OK;
+    sdhci_device_t* dev = ctx;
+
+    mtx_lock(&dev->mtx);
+
+    if ((bus_width == SDMMC_BUS_WIDTH_8) && !(dev->caps & SDHCI_CAP_BUS_WIDTH_8)) {
+        st =  ZX_ERR_NOT_SUPPORTED;
+        goto unlock;
+    }
+
+    switch (bus_width) {
+    case SDMMC_BUS_WIDTH_1:
+        dev->regs->ctrl0 &= ~SDHCI_HOSTCTRL_EXT_DATA_WIDTH;
+        dev->regs->ctrl0 &= ~SDHCI_HOSTCTRL_FOUR_BIT_BUS_WIDTH;
+        break;
+    case SDMMC_BUS_WIDTH_4:
+        dev->regs->ctrl0 &= ~SDHCI_HOSTCTRL_EXT_DATA_WIDTH;
+        dev->regs->ctrl0 |= SDHCI_HOSTCTRL_FOUR_BIT_BUS_WIDTH;
+        break;
+    case SDMMC_BUS_WIDTH_8:
+        dev->regs->ctrl0 |= SDHCI_HOSTCTRL_EXT_DATA_WIDTH;
+        break;
+    default:
+        st = ZX_ERR_INVALID_ARGS;
+        goto unlock;
+    }
+
+unlock:
+    mtx_unlock(&dev->mtx);
+    return st;
+}
+
+static zx_status_t sdhci_set_bus_freq(void* ctx, uint32_t bus_freq) {
+    zx_status_t st = ZX_OK;
+    sdhci_device_t* dev = ctx;
+
+    mtx_lock(&dev->mtx);
+
+    const uint32_t divider = get_clock_divider(dev->base_clock, bus_freq);
     const uint8_t divider_lo = divider & 0xff;
     const uint8_t divider_hi = (divider >> 8) & 0x3;
 
@@ -564,9 +600,10 @@ static zx_status_t sdhci_set_bus_frequency(sdhci_device_t* dev, uint32_t target_
 
     uint32_t iterations = 0;
     while (regs->state & (SDHCI_STATE_CMD_INHIBIT | SDHCI_STATE_DAT_INHIBIT)) {
-        if (++iterations > 1000)
-            return ZX_ERR_TIMED_OUT;
-
+        if (++iterations > 1000) {
+            st = ZX_ERR_TIMED_OUT;
+            goto unlock;
+        }
         zx_nanosleep(zx_deadline_after(ZX_MSEC(1)));
     }
 
@@ -585,10 +622,17 @@ static zx_status_t sdhci_set_bus_frequency(sdhci_device_t* dev, uint32_t target_
     regs->ctrl1 |= SDHCI_SD_CLOCK_ENABLE;
     zx_nanosleep(zx_deadline_after(ZX_MSEC(2)));
 
-    return ZX_OK;
+unlock:
+    mtx_unlock(&dev->mtx);
+    return st;
 }
 
-static zx_status_t sdhci_set_timing(sdhci_device_t* dev, uint32_t timing) {
+static zx_status_t sdhci_set_timing(void* ctx, sdmmc_timing_t timing) {
+    zx_status_t st = ZX_OK;
+    sdhci_device_t* dev = ctx;
+
+    mtx_lock(&dev->mtx);
+
     // Toggle high-speed
     if (timing != SDMMC_TIMING_LEGACY) {
         dev->regs->ctrl0 |= SDHCI_HOSTCTRL_HIGHSPEED_ENABLE;
@@ -614,97 +658,22 @@ static zx_status_t sdhci_set_timing(sdhci_device_t* dev, uint32_t timing) {
     dev->regs->ctrl1 |= SDHCI_SD_CLOCK_ENABLE;
     zx_nanosleep(zx_deadline_after(ZX_MSEC(2)));
 
-    return ZX_OK;
+    mtx_unlock(&dev->mtx);
+    return st;
 }
 
-static void sdhci_hw_reset(sdhci_device_t* dev) {
+static void sdhci_hw_reset(void* ctx) {
+    sdhci_device_t* dev = ctx;
+    mtx_lock(&dev->mtx);
     if (dev->sdhci.ops->hw_reset) {
         dev->sdhci.ops->hw_reset(dev->sdhci.ctx);
     }
+    mtx_unlock(&dev->mtx);
 }
 
-static zx_status_t sdhci_set_bus_width(sdhci_device_t* dev, const uint32_t new_bus_width) {
-    if ((new_bus_width == SDMMC_BUS_WIDTH_8) &&
-        !(dev->regs->caps0 & SDHCI_CORECFG_8_BIT_SUPPORT)) {
-        return ZX_ERR_NOT_SUPPORTED;
-    }
+static zx_status_t sdhci_perform_tuning(void* ctx) {
+    sdhci_device_t* dev = ctx;
 
-    switch (new_bus_width) {
-    case SDMMC_BUS_WIDTH_1:
-        dev->regs->ctrl0 &= ~SDHCI_HOSTCTRL_EXT_DATA_WIDTH;
-        dev->regs->ctrl0 &= ~SDHCI_HOSTCTRL_FOUR_BIT_BUS_WIDTH;
-        break;
-    case SDMMC_BUS_WIDTH_4:
-        dev->regs->ctrl0 &= ~SDHCI_HOSTCTRL_EXT_DATA_WIDTH;
-        dev->regs->ctrl0 |= SDHCI_HOSTCTRL_FOUR_BIT_BUS_WIDTH;
-        break;
-    case SDMMC_BUS_WIDTH_8:
-        dev->regs->ctrl0 |= SDHCI_HOSTCTRL_EXT_DATA_WIDTH;
-        break;
-    default:
-        return ZX_ERR_INVALID_ARGS;
-    }
-
-    return ZX_OK;
-}
-
-static zx_status_t sdhci_set_signal_voltage(sdhci_device_t* dev, uint32_t new_voltage) {
-
-    switch (new_voltage) {
-        case SDMMC_SIGNAL_VOLTAGE_330:
-        case SDMMC_SIGNAL_VOLTAGE_180:
-            break;
-        default:
-            return ZX_ERR_INVALID_ARGS;
-    }
-
-    volatile struct sdhci_regs* regs = dev->regs;
-
-    // Disable the SD clock before messing with the voltage.
-    regs->ctrl1 &= ~SDHCI_SD_CLOCK_ENABLE;
-    zx_nanosleep(zx_deadline_after(ZX_MSEC(2)));
-
-    if (new_voltage == SDMMC_SIGNAL_VOLTAGE_180) {
-        regs->ctrl2 |= SDHCI_HOSTCTRL2_1P8V_SIGNALLING_ENA;
-        // 1.8V regulator out should be stable within 5ms
-        zx_nanosleep(zx_deadline_after(ZX_MSEC(5)));
-        if (driver_get_log_flags() & DDK_LOG_TRACE) {
-            if (!(regs->ctrl2 & SDHCI_HOSTCTRL2_1P8V_SIGNALLING_ENA)) {
-                zxlogf(TRACE, "sdhci: 1.8V regulator output did not become stable\n");
-            }
-        }
-    } else {
-        regs->ctrl2 &= ~SDHCI_HOSTCTRL2_1P8V_SIGNALLING_ENA;
-        // 3.3V regulator out should be stable within 5ms
-        zx_nanosleep(zx_deadline_after(ZX_MSEC(5)));
-        if (driver_get_log_flags() & DDK_LOG_TRACE) {
-            if (regs->ctrl2 & SDHCI_HOSTCTRL2_1P8V_SIGNALLING_ENA) {
-                zxlogf(TRACE, "sdhci: 3.3V regulator output did not become stable\n");
-            }
-        }
-    }
-
-    // Make sure our changes are acknolwedged.
-    uint32_t expected_mask = SDHCI_PWRCTRL_SD_BUS_POWER;
-    if (new_voltage == SDMMC_SIGNAL_VOLTAGE_180) {
-        expected_mask |= SDHCI_PWRCTRL_SD_BUS_VOLTAGE_1P8V;
-    } else {
-        expected_mask |= SDHCI_PWRCTRL_SD_BUS_VOLTAGE_3P3V;
-    }
-    if ((regs->ctrl0 & expected_mask) != expected_mask) {
-        zxlogf(TRACE, "sdhci: after voltage switch ctrl0=0x%08x, expected=0x%08x\n",
-                regs->ctrl0, expected_mask);
-        return ZX_ERR_INTERNAL;
-    }
-
-    // Turn the clock back on
-    regs->ctrl1 |= SDHCI_SD_CLOCK_ENABLE;
-    zx_nanosleep(zx_deadline_after(ZX_MSEC(2)));
-
-    return ZX_OK;
-}
-
-static zx_status_t sdhci_mmc_tuning(sdhci_device_t* dev) {
     int count = 0;
     iotxn_t* tune_txn = NULL;
     zx_status_t st;
@@ -737,57 +706,33 @@ static zx_status_t sdhci_mmc_tuning(sdhci_device_t* dev) {
     return ZX_OK;
 }
 
-static zx_status_t sdhci_ioctl(void* ctx, uint32_t op,
-                          const void* in_buf, size_t in_len,
-                          void* out_buf, size_t out_len, size_t* out_actual) {
+static zx_status_t sdhci_request(void* ctx, sdmmc_request_t* req) {
+    zx_status_t st = ZX_OK;
     sdhci_device_t* dev = ctx;
-    uint32_t* arg = (uint32_t*)in_buf;
+    mtx_lock(&dev->mtx);
 
-    switch (op) {
-    case IOCTL_SDMMC_SET_SIGNAL_VOLTAGE:
-        if (in_len < sizeof(*arg)) {
-            return ZX_ERR_INVALID_ARGS;
-        } else {
-            return sdhci_set_signal_voltage(dev, *arg);
-        }
-    case IOCTL_SDMMC_SET_BUS_WIDTH:
-        if (in_len < sizeof(*arg)) {
-            return ZX_ERR_INVALID_ARGS;
-        } else {
-            return sdhci_set_bus_width(dev, *arg);
-        }
-    case IOCTL_SDMMC_SET_BUS_FREQ:
-        if (in_len < sizeof(*arg)) {
-            return ZX_ERR_INVALID_ARGS;
-        } else {
-            return sdhci_set_bus_frequency(dev, *arg);
-        }
-    case IOCTL_SDMMC_SET_TIMING:
-        if (in_len < sizeof(*arg)) {
-            return ZX_ERR_INVALID_ARGS;
-        } else {
-            return sdhci_set_timing(dev, *arg);
-        }
-    case IOCTL_SDMMC_HW_RESET:
-        sdhci_hw_reset(dev);
-        return ZX_OK;
-    case IOCTL_SDMMC_MMC_TUNING:
-        return sdhci_mmc_tuning(dev);
-    case IOCTL_SDMMC_GET_MAX_TRANSFER_SIZE: {
-        if (out_len != sizeof(uint32_t)) {
-            return ZX_ERR_INVALID_ARGS;
-        }
-        uint32_t max_transfer_size = DMA_DESC_COUNT * PAGE_SIZE;
-        memcpy(out_buf, &max_transfer_size, sizeof(max_transfer_size));
-        if (out_actual) {
-            *out_actual = sizeof(max_transfer_size);
-        }
-        return ZX_OK;
-    }
+    // one command at a time
+    if (dev->req != NULL) {
+        st = ZX_ERR_SHOULD_WAIT;
+        goto unlock;
     }
 
-    return ZX_ERR_NOT_SUPPORTED;
+    st = sdhci_start_req_locked(dev, req);
+
+unlock:
+    mtx_unlock(&dev->mtx);
+    return st;
 }
+
+static sdmmc_protocol_ops_t sdmmc_proto = {
+    .set_signal_voltage = sdhci_set_signal_voltage,
+    .set_bus_width = sdhci_set_bus_width,
+    .set_bus_freq = sdhci_set_bus_freq,
+    .set_timing = sdhci_set_timing,
+    .hw_reset = sdhci_hw_reset,
+    .perform_tuning = sdhci_perform_tuning,
+    .request = sdhci_request,
+};
 
 static void sdhci_unbind(void* ctx) {
     sdhci_device_t* dev = ctx;
@@ -801,8 +746,6 @@ static void sdhci_release(void* ctx) {
 
 static zx_protocol_device_t sdhci_device_proto = {
     .version = DEVICE_OPS_VERSION,
-    .iotxn_queue = sdhci_iotxn_queue,
-    .ioctl = sdhci_ioctl,
     .unbind = sdhci_unbind,
     .release = sdhci_release,
 };
@@ -889,11 +832,10 @@ static zx_status_t sdhci_controller_init(sdhci_device_t* dev) {
     dev->regs->ctrl0 &= ~SDHCI_PWRCTRL_SD_BUS_POWER;
 
     // Set SD bus voltage to maximum supported by the host controller
-    const uint32_t caps = dev->regs->caps0;
     uint32_t ctrl0 = dev->regs->ctrl0 & ~SDHCI_PWRCTRL_SD_BUS_VOLTAGE_MASK;
-    if (caps & SDHCI_CORECFG_3P3_VOLT_SUPPORT) {
+    if (dev->caps & SDHCI_CAP_VOLTAGE_330) {
         ctrl0 |= SDHCI_PWRCTRL_SD_BUS_VOLTAGE_3P3V;
-    } else if (caps & SDHCI_CORECFG_3P0_VOLT_SUPPORT) {
+    } else if (dev->caps & SDHCI_CAP_VOLTAGE_300) {
         ctrl0 |= SDHCI_PWRCTRL_SD_BUS_VOLTAGE_3P0V;
     } else {
         ctrl0 |= SDHCI_PWRCTRL_SD_BUS_VOLTAGE_1P8V;
@@ -944,8 +886,6 @@ static zx_status_t sdhci_bind(void* ctx, zx_device_t* parent) {
     }
     thrd_detach(irq_thread);
 
-    dev->irq_completion = COMPLETION_INIT;
-    dev->pending_completion = COMPLETION_INIT;
     dev->parent = parent;
 
     // Ensure that we're SDv3.
@@ -970,6 +910,24 @@ static zx_status_t sdhci_bind(void* ctx, zx_device_t* parent) {
     }
     dev->quirks = dev->sdhci.ops->get_quirks(dev->sdhci.ctx);
 
+    // Get controller capabilities
+    uint32_t caps0 = dev->regs->caps0;
+    if (caps0 & SDHCI_CORECFG_8_BIT_SUPPORT) {
+        dev->caps |= SDHCI_CAP_BUS_WIDTH_8;
+    }
+    if (caps0 & SDHCI_CORECFG_ADMA2_SUPPORT) {
+        dev->caps |= SDHCI_CAP_ADMA2;
+    }
+    if (caps0 & SDHCI_CORECFG_64BIT_SUPPORT) {
+        dev->caps |= SDHCI_CAP_64BIT;
+    }
+    if (caps0 & SDHCI_CORECFG_3P3_VOLT_SUPPORT) {
+        dev->caps |= SDHCI_CAP_VOLTAGE_330;
+    }
+    if (caps0 & SDHCI_CORECFG_3P0_VOLT_SUPPORT) {
+        dev->caps |= SDHCI_CAP_VOLTAGE_300;
+    }
+
     // initialize the controller
     status = sdhci_controller_init(dev);
     if (status != ZX_OK) {
@@ -983,6 +941,7 @@ static zx_status_t sdhci_bind(void* ctx, zx_device_t* parent) {
         .ctx = dev,
         .ops = &sdhci_device_proto,
         .proto_id = ZX_PROTOCOL_SDMMC,
+        .proto_ops = &sdmmc_proto,
     };
 
     status = device_add(parent, &args, &dev->zxdev);

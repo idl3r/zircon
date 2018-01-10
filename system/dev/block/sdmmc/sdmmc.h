@@ -13,23 +13,22 @@
 
 __BEGIN_CDECLS;
 
+typedef enum sdmmc_type {
+    SDMMC_TYPE_SD,
+    SDMMC_TYPE_MMC,
+} sdmmc_type_t;
+
 typedef struct sdmmc {
     zx_device_t* zxdev;
     zx_device_t* host_zxdev;
 
-    uint8_t type;
-#define SDMMC_TYPE_SD   0
-#define SDMMC_TYPE_MMC  1
+    sdmmc_protocol_t host;
 
-    uint8_t bus_width;      // Data bus width
-    uint8_t signal_voltage; // Bus signal voltage
+    sdmmc_type_t type;
 
-    uint8_t timing;         // Bus timing
-#define SDMMC_TIMING_LEGACY 0
-#define SDMMC_TIMING_HS     1
-#define SDMMC_TIMING_HSDDR  2
-#define SDMMC_TIMING_HS200  3
-#define SDMMC_TIMING_HS400  4
+    sdmmc_bus_width_t bus_width;      // Data bus width
+    sdmmc_voltage_t signal_voltage; // Bus signal voltage
+    sdmmc_timing_t timing;         // Bus timing
 
     unsigned clock_rate;    // Bus clock rate
     uint64_t capacity;      // Card capacity
