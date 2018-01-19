@@ -33,6 +33,10 @@ typedef enum sdmmc_timing {
 typedef struct sdmmc_request sdmmc_request_t;
 
 struct sdmmc_request {
+    block_op_t bop;
+
+    list_node_t node;
+
     uint32_t cmd;
     uint32_t arg;
 

@@ -117,12 +117,6 @@ static zx_status_t sdmmc_ioctl(void* ctx, uint32_t op, const void* cmd,
         sdmmc_device_t* dev = ctx;
         return device_rebind(dev->zxdev);
     }
-    case IOCTL_BLOCK_GET_NAME: {
-        return ZX_ERR_NOT_SUPPORTED;
-    }
-    case IOCTL_DEVICE_SYNC: {
-        return sdmmc_device_sync(ctx);
-    }
     default:
         return ZX_ERR_NOT_SUPPORTED;
     }
@@ -211,14 +205,65 @@ static void sdmmc_iotxn_queue(void* ctx, iotxn_t* txn) {
     zx_object_signal(dev->worker_event, 0, SDMMC_IOTXN_RECEIVED);
 }
 
-// Block device protocol.
+// Device protocol.
 static zx_protocol_device_t sdmmc_device_proto = {
     .version = DEVICE_OPS_VERSION,
     .ioctl = sdmmc_ioctl,
     .unbind = sdmmc_unbind,
     .release = sdmmc_release,
-    .iotxn_queue = sdmmc_iotxn_queue,
-    .get_size = sdmmc_get_size,
+};
+
+static void sdmmc_query(void* ctx, block_info_t* info_out, size_t* block_op_size_out) {
+    sdmmc_device_t* dev = ctx;
+    memcpy(info_out, &dev->block_info, sizeof(info_out));
+    *block_op_size_out = sizeof(sdmmc_request_t) - sizeof(block_op_t);
+}
+
+static void sdmmc_queue(void* ctx, block_op_t* txn) {
+    zx_status_t st = ZX_OK;
+    sdmmc_device_t* dev = ctx;
+    sdmmc_request_t* req = containerof(txn, sdmmc_request_t, bop);
+
+    if ((txn->command == BLOCK_OP_READ) || (txn->command == BLOCK_OP_WRITE)) {
+        // Figure out which SD command we need to issue
+        bool multiblk = txn->rw.length > 1;
+        if (txn->command == BLOCK_OP_READ) {
+            req->cmd = multiblk ? SDMMC_READ_MULTIPLE_BLOCK : SDMMC_READ_BLOCK;
+        } else {
+            req->cmd = multiblk ? SDMMC_WRITE_MULTIPLE_BLOCK : SDMMC_WRITE_BLOCK;
+        }
+
+        req->blockcount = txn->rw.length;
+        req->blocksize = dev->block_info.block_size;
+
+        if (sdmmc_use_dma(dev)) {
+            req->use_dma = true;
+
+            zx_status_t st = ZX_OK;
+            size_t bytes = txn->rw.length * req->blocksize;
+            zx_handle_t vmo = txn->rw.vmo;
+            if ((st = zx_vmo_op_range(vmo, ZX_VMO_OP_COMMIT, txn->rw.offset_vmo, bytes,
+                                      NULL, 0)) != ZX_OK) {
+                zxlogf(TRACE, "sdmmc: could not commit pages\n");
+                goto err;
+            }
+        } else {
+        }
+
+    } else if (txn->command == BLOCK_OP_FLUSH) {
+    } else {
+        st = ZX_ERR_NOT_SUPPORTED;
+        return;
+    }
+    return;
+err:
+    txn->completion_cb(txn, st);
+}
+
+// Block protocol
+static block_protocol_ops_t block_proto = {
+    .query = sdmmc_query,
+    .queue = sdmmc_queue,
 };
 
 static zx_status_t sdmmc_wait_for_tran(sdmmc_device_t* dev) {
@@ -289,7 +334,7 @@ static void sdmmc_do_txn(sdmmc_device_t* dev, iotxn_t* txn) {
 
     sdmmc_request_t req = {
         .cmd = cmd,
-        .arg = txn->offset / SDHC_BLOCK_SIZE,
+        (sdmmc_request_t*).arg = txn->offset / SDHC_BLOCK_SIZE,
         .blockcount = txn->length / SDHC_BLOCK_SIZE,
         .blocksize = SDHC_BLOCK_SIZE,
     };
