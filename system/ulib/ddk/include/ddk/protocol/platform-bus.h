@@ -54,6 +54,7 @@ typedef struct {
     zx_status_t (*device_add)(void* ctx, const pbus_dev_t* dev, uint32_t flags);
     zx_status_t (*device_enable)(void* ctx, uint32_t vid, uint32_t pid, uint32_t did, bool enable);
     const char* (*get_board_name)(void* ctx);
+    zx_status_t (*add_proto_helper)(void* ctx, uint32_t proto_id, const pbus_dev_t* dev);
 } platform_bus_protocol_ops_t;
 
 typedef struct {
@@ -80,6 +81,11 @@ static inline zx_status_t pbus_device_enable(platform_bus_protocol_t* pbus, uint
 
 static inline const char* pbus_get_board_name(platform_bus_protocol_t* pbus) {
     return pbus->ops->get_board_name(pbus->ctx);
+}
+
+static inline zx_status_t pbus_add_proto_helper(platform_bus_protocol_t* pbus, uint32_t proto_id,
+                                                const pbus_dev_t* dev) {
+    return pbus->ops->add_proto_helper(pbus->ctx, proto_id, dev);
 }
 
 __END_CDECLS;

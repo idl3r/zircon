@@ -360,7 +360,8 @@ static zx_protocol_device_t platform_dev_proto = {
     // need to support re-adding platform devices when they are reenabled.
 };
 
-zx_status_t platform_device_add(platform_bus_t* bus, const pbus_dev_t* pdev, uint32_t flags) {
+zx_status_t platform_device_add(platform_bus_t* bus, const pbus_dev_t* pdev, bool new_devhost,
+                                uint32_t flags) {
     zx_status_t status = ZX_OK;
 
     if (flags & ~PDEV_ADD_DISABLED) {
@@ -428,7 +429,7 @@ zx_status_t platform_device_add(platform_bus_t* bus, const pbus_dev_t* pdev, uin
     list_add_tail(&bus->devices, &dev->node);
 
     if ((flags & PDEV_ADD_DISABLED) == 0) {
-        status = platform_device_enable(dev, true);
+        status = platform_device_enable(dev, true, new_devhost);
     }
 
 fail:
@@ -439,7 +440,7 @@ fail:
     return status;
 }
 
-zx_status_t platform_device_enable(platform_dev_t* dev, bool enable) {
+zx_status_t platform_device_enable(platform_dev_t* dev, bool enable, bool new_devhost) {
     zx_status_t status = ZX_OK;
 
     if (enable && !dev->enabled) {
@@ -465,6 +466,9 @@ zx_status_t platform_device_enable(platform_dev_t* dev, bool enable) {
             .proxy_args = argstr,
             .flags = DEVICE_ADD_MUST_ISOLATE,
         };
+        if (new_devhost) {
+            args.flags = DEVICE_ADD_MUST_ISOLATE;
+        }
         // add PCI root at top level
         zx_device_t* parent = dev->bus->zxdev;
         if (dev->did == PDEV_DID_KPCI) {

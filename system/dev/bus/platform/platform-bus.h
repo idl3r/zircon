@@ -12,6 +12,7 @@
 #include <ddk/protocol/platform-bus.h>
 #include <ddk/protocol/platform-device.h>
 #include <ddk/protocol/usb-mode-switch.h>
+#include <sync/completion.h>
 #include <zircon/types.h>
 
 // context structure for the platform bus
@@ -30,6 +31,8 @@ typedef struct {
     // list of i2c_txn_t
     list_node_t i2c_txns;
     mtx_t i2c_txn_lock;
+
+    completion_t proto_completion;
 } platform_bus_t;
 
 // context structure for a platform device
@@ -64,5 +67,6 @@ typedef struct {
 
 // platform-device.c
 void platform_dev_free(platform_dev_t* dev);
-zx_status_t platform_device_add(platform_bus_t* bus, const pbus_dev_t* dev, uint32_t flags);
-zx_status_t platform_device_enable(platform_dev_t* dev, bool enable);
+zx_status_t platform_device_add(platform_bus_t* bus, const pbus_dev_t* dev, bool new_devhost,
+                                uint32_t flags);
+zx_status_t platform_device_enable(platform_dev_t* dev, bool enable, bool new_devhost);
