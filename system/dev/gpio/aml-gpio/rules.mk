@@ -9,8 +9,7 @@ MODULE := $(LOCAL_DIR)
 MODULE_TYPE := userlib
 
 MODULE_SRCS += \
-    $(LOCAL_DIR)/a113-clocks.c \
-    $(LOCAL_DIR)/aml-i2c.c \
+    $(LOCAL_DIR)/aml-gpio.c \
 
 MODULE_STATIC_LIBS := \
     system/ulib/ddk \
@@ -20,5 +19,7 @@ MODULE_LIBS := \
     system/ulib/driver \
     system/ulib/c \
     system/ulib/zircon \
+
+MODULE_HEADER_DEPS := system/dev/soc/aml-a113
 
 include make/module.mk

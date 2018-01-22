@@ -16,6 +16,7 @@ MODULE_SRCS += \
 
 MODULE_STATIC_LIBS := \
     system/dev/soc/aml-a113 \
+    system/dev/gpio/aml-gpio \
     system/ulib/ddk \
     system/ulib/sync
 
