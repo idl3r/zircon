@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <ddk/debug.h>
+#include <ddk/device.h>
+#include <ddk/protocol/platform-defs.h>
 #include <soc/aml-a113/a113-hw.h>
 
 #include <limits.h>
@@ -18,6 +21,7 @@
 #define GPIOAO_BASE_PHYS 0xff800000
 #define GPIOAO_BASE_PAGE ((~PAGE_MASK) & GPIOAO_BASE_PHYS)
 
+/*
 static aml_gpio_block_t gpio_blocks[] = {
     // GPIO X Block
     {
@@ -160,7 +164,42 @@ static aml_gpio_block_t gpio_blocks[] = {
     },
 };
 
-zx_status_t gauss_gpio_init(aml_gpio_t* gpio) {
-    return aml_gpio_init(gpio, GPIO_BASE_PHYS, GPIOAO_BASE_PHYS, gpio_blocks,
-                         countof(gpio_blocks));
+*/
+
+static const pbus_mmio_t gpio_mmios[] = {
+/*
+    {
+        .base = DWC3_MMIO_BASE,
+        .length = DWC3_MMIO_LENGTH,
+    },
+*/
+};
+
+static const pbus_irq_t gpio_irqs[] = {
+/*
+    {
+        .irq = DWC3_IRQ,
+    },
+*/
+};
+
+static const pbus_dev_t gpio_dev = {
+    .name = "gpio",
+    .vid = PDEV_VID_AMLOGIC,
+    .pid = PDEV_PID_GENERIC,
+    .did = PDEV_DID_AMLOGIC_GPIO,
+    .mmios = gpio_mmios,
+    .mmio_count = countof(gpio_mmios),
+    .irqs = gpio_irqs,
+    .irq_count = countof(gpio_irqs),
+};
+
+zx_status_t gauss_gpio_init(gauss_bus_t* bus) {
+    zx_status_t status = pbus_add_proto_helper(&bus->pbus, ZX_PROTOCOL_GPIO, &gpio_dev);
+    if (status != ZX_OK) {
+        zxlogf(ERROR, "pbus_add_proto_helper(ZX_PROTOCOL_GPIO)  failed: %d\n", status);
+        return status;
+    }
+
+    return device_get_protocol(bus->parent, ZX_PROTOCOL_GPIO, &bus->gpio);
 }

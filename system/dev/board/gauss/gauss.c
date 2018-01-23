@@ -92,8 +92,6 @@ usb_mode_switch_protocol_ops_t usb_mode_switch_ops = {
 
 static void gauss_bus_release(void* ctx) {
     gauss_bus_t* bus = ctx;
-
-    aml_gpio_release(&bus->gpio);
     free(bus);
 }
 
@@ -119,37 +117,38 @@ static zx_status_t gauss_bus_bind(void* ctx, zx_device_t* parent) {
     if (!bus) {
         return ZX_ERR_NO_MEMORY;
     }
+    bus->parent = parent;
 
     if ((status = device_get_protocol(parent, ZX_PROTOCOL_PLATFORM_BUS, &bus->pbus)) != ZX_OK) {
         goto fail;
     }
 
-    if ((status = gauss_gpio_init(&bus->gpio)) != ZX_OK) {
+    if ((status = gauss_gpio_init(bus)) != ZX_OK) {
         zxlogf(ERROR, "gauss_gpio_init failed: %d\n", status);
         goto fail;
     }
 
     // pinmux for Gauss i2c
-    gpio_set_alt_function(&bus->gpio.proto, I2C_SCK_A, 1);
-    gpio_set_alt_function(&bus->gpio.proto, I2C_SDA_A, 1);
-    gpio_set_alt_function(&bus->gpio.proto, I2C_SCK_B, 1);
-    gpio_set_alt_function(&bus->gpio.proto, I2C_SDA_B, 1);
+    gpio_set_alt_function(&bus->gpio, I2C_SCK_A, 1);
+    gpio_set_alt_function(&bus->gpio, I2C_SDA_A, 1);
+    gpio_set_alt_function(&bus->gpio, I2C_SCK_B, 1);
+    gpio_set_alt_function(&bus->gpio, I2C_SDA_B, 1);
 
     // Config pinmux for gauss PDM pins
-    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(14), 1);
-    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(15), 1);
-    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(16), 1);
-    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(17), 1);
-    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(18), 1);
+    gpio_set_alt_function(&bus->gpio, A113_GPIOA(14), 1);
+    gpio_set_alt_function(&bus->gpio, A113_GPIOA(15), 1);
+    gpio_set_alt_function(&bus->gpio, A113_GPIOA(16), 1);
+    gpio_set_alt_function(&bus->gpio, A113_GPIOA(17), 1);
+    gpio_set_alt_function(&bus->gpio, A113_GPIOA(18), 1);
 
-    gpio_set_alt_function(&bus->gpio.proto, TDM_BCLK_C, 1);
-    gpio_set_alt_function(&bus->gpio.proto, TDM_FSYNC_C, 1);
-    gpio_set_alt_function(&bus->gpio.proto, TDM_MOSI_C, 1);
-    gpio_set_alt_function(&bus->gpio.proto, TDM_MISO_C, 2);
+    gpio_set_alt_function(&bus->gpio, TDM_BCLK_C, 1);
+    gpio_set_alt_function(&bus->gpio, TDM_FSYNC_C, 1);
+    gpio_set_alt_function(&bus->gpio, TDM_MOSI_C, 1);
+    gpio_set_alt_function(&bus->gpio, TDM_MISO_C, 2);
 
-    gpio_set_alt_function(&bus->gpio.proto, SPK_MUTEn, 0);
-    gpio_config(&bus->gpio.proto, SPK_MUTEn, GPIO_DIR_OUT);
-    gpio_write(&bus->gpio.proto, SPK_MUTEn, 1);
+    gpio_set_alt_function(&bus->gpio, SPK_MUTEn, 0);
+    gpio_config(&bus->gpio, SPK_MUTEn, GPIO_DIR_OUT);
+    gpio_write(&bus->gpio, SPK_MUTEn, 1);
 
     if ((status = aml_i2c_init(&bus->i2c, i2c_devs, countof(i2c_devs))) != ZX_OK) {
         zxlogf(ERROR, "aml_i2c_init failed: %d\n", status);
@@ -187,10 +186,6 @@ static zx_status_t gauss_bus_bind(void* ctx, zx_device_t* parent) {
     }
 
     status = pbus_set_protocol(&bus->pbus, ZX_PROTOCOL_USB_MODE_SWITCH, &bus->usb_mode_switch);
-    if (status != ZX_OK) {
-        goto fail;
-    }
-    status = pbus_set_protocol(&bus->pbus, ZX_PROTOCOL_GPIO, &bus->gpio.proto);
     if (status != ZX_OK) {
         goto fail;
     }
