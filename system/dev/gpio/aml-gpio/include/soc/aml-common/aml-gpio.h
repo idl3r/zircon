@@ -31,7 +31,6 @@ typedef struct {
     size_t gpio_block_count;
 } aml_gpio_t;
 
-zx_status_t aml_pinmux_config(aml_gpio_t* gpio, const uint32_t pin, const uint32_t fn);
 zx_status_t aml_gpio_init(aml_gpio_t* gpio, zx_paddr_t gpio_base, zx_paddr_t a0_base,
                           aml_gpio_block_t* gpio_blocks, size_t gpio_block_count);
 void aml_gpio_release(aml_gpio_t* gpio);

@@ -130,24 +130,24 @@ static zx_status_t gauss_bus_bind(void* ctx, zx_device_t* parent) {
     }
 
     // pinmux for Gauss i2c
-    aml_pinmux_config(&bus->gpio, I2C_SCK_A, 1);
-    aml_pinmux_config(&bus->gpio, I2C_SDA_A, 1);
-    aml_pinmux_config(&bus->gpio, I2C_SCK_B, 1);
-    aml_pinmux_config(&bus->gpio, I2C_SDA_B, 1);
+    gpio_set_alt_function(&bus->gpio.proto, I2C_SCK_A, 1);
+    gpio_set_alt_function(&bus->gpio.proto, I2C_SDA_A, 1);
+    gpio_set_alt_function(&bus->gpio.proto, I2C_SCK_B, 1);
+    gpio_set_alt_function(&bus->gpio.proto, I2C_SDA_B, 1);
 
     // Config pinmux for gauss PDM pins
-    aml_pinmux_config(&bus->gpio, A113_GPIOA(14), 1);
-    aml_pinmux_config(&bus->gpio, A113_GPIOA(15), 1);
-    aml_pinmux_config(&bus->gpio, A113_GPIOA(16), 1);
-    aml_pinmux_config(&bus->gpio, A113_GPIOA(17), 1);
-    aml_pinmux_config(&bus->gpio, A113_GPIOA(18), 1);
+    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(14), 1);
+    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(15), 1);
+    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(16), 1);
+    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(17), 1);
+    gpio_set_alt_function(&bus->gpio.proto, A113_GPIOA(18), 1);
 
-    aml_pinmux_config(&bus->gpio, TDM_BCLK_C, 1);
-    aml_pinmux_config(&bus->gpio, TDM_FSYNC_C, 1);
-    aml_pinmux_config(&bus->gpio, TDM_MOSI_C, 1);
-    aml_pinmux_config(&bus->gpio, TDM_MISO_C, 2);
+    gpio_set_alt_function(&bus->gpio.proto, TDM_BCLK_C, 1);
+    gpio_set_alt_function(&bus->gpio.proto, TDM_FSYNC_C, 1);
+    gpio_set_alt_function(&bus->gpio.proto, TDM_MOSI_C, 1);
+    gpio_set_alt_function(&bus->gpio.proto, TDM_MISO_C, 2);
 
-    aml_pinmux_config(&bus->gpio, SPK_MUTEn, 0);
+    gpio_set_alt_function(&bus->gpio.proto, SPK_MUTEn, 0);
     gpio_config(&bus->gpio.proto, SPK_MUTEn, GPIO_DIR_OUT);
     gpio_write(&bus->gpio.proto, SPK_MUTEn, 1);
 

@@ -32,49 +32,6 @@ static zx_status_t aml_pin_to_block(aml_gpio_t* gpio, const uint32_t pinid, aml_
     return ZX_ERR_NOT_FOUND;
 }
 
-// Configure a pin for an alternate function specified by fn
-zx_status_t aml_pinmux_config(aml_gpio_t* gpio, const uint32_t pin, const uint32_t fn) {
-    if (fn > A113_PINMUX_ALT_FN_MAX) {
-        zxlogf(ERROR, "aml_config_pinmux: pin mux alt config out of range"
-                " %u\n", fn);
-        return ZX_ERR_OUT_OF_RANGE;
-    }
-
-    zx_status_t status;
-
-    aml_gpio_block_t* block;
-    if (((status = aml_pin_to_block(gpio, pin, &block)) != ZX_OK) != ZX_OK) {
-        zxlogf(ERROR, "aml_config_pinmux: pin not found %u\n", pin);
-        return status;
-    }
-
-    // Points to the control register.
-    volatile uint32_t* reg = (volatile uint32_t*)(block->ctrl_block_base_virt);
-    reg += block->mux_offset;
-
-    // Sanity Check: pin_to_block must return a block that contains `pin`
-    //               therefore `pin` must be greater than or equal to the first
-    //               pin of the block.
-    ZX_DEBUG_ASSERT(pin >= block->start_pin);
-
-    // Each Pin Mux is controlled by a 4 bit wide field in `reg`
-    // Compute the offset for this pin.
-    const uint32_t pin_shift = (pin - block->start_pin) * 4;
-    const uint32_t mux_mask = ~(0x0F << pin_shift);
-    const uint32_t fn_val = fn << pin_shift;
-
-    mtx_lock(&block->lock);
-
-    uint32_t regval = readl(reg);
-    regval &= mux_mask;     // Remove the previous value for the mux
-    regval |= fn_val;       // Assign the new value to the mux
-    writel(regval, reg);
-
-    mtx_unlock(&block->lock);
-
-    return ZX_OK;
-}
-
 static zx_status_t aml_gpio_set_direction(aml_gpio_block_t* block,
                                            const uint32_t index,
                                            const gpio_config_flags_t flags) {
@@ -116,6 +73,51 @@ static zx_status_t aml_gpio_config(void* ctx, uint32_t index, gpio_config_flags_
                index, status);
         return status;
     }
+
+    return ZX_OK;
+}
+
+// Configure a pin for an alternate function specified by fn
+static zx_status_t aml_gpio_set_alt_function(void* ctx, const uint32_t pin, const uint32_t fn) {
+    aml_gpio_t* gpio = ctx;
+
+    if (fn > A113_PINMUX_ALT_FN_MAX) {
+        zxlogf(ERROR, "aml_config_pinmux: pin mux alt config out of range"
+                " %u\n", fn);
+        return ZX_ERR_OUT_OF_RANGE;
+    }
+
+    zx_status_t status;
+
+    aml_gpio_block_t* block;
+    if (((status = aml_pin_to_block(gpio, pin, &block)) != ZX_OK) != ZX_OK) {
+        zxlogf(ERROR, "aml_config_pinmux: pin not found %u\n", pin);
+        return status;
+    }
+
+    // Points to the control register.
+    volatile uint32_t* reg = (volatile uint32_t*)(block->ctrl_block_base_virt);
+    reg += block->mux_offset;
+
+    // Sanity Check: pin_to_block must return a block that contains `pin`
+    //               therefore `pin` must be greater than or equal to the first
+    //               pin of the block.
+    ZX_DEBUG_ASSERT(pin >= block->start_pin);
+
+    // Each Pin Mux is controlled by a 4 bit wide field in `reg`
+    // Compute the offset for this pin.
+    const uint32_t pin_shift = (pin - block->start_pin) * 4;
+    const uint32_t mux_mask = ~(0x0F << pin_shift);
+    const uint32_t fn_val = fn << pin_shift;
+
+    mtx_lock(&block->lock);
+
+    uint32_t regval = readl(reg);
+    regval &= mux_mask;     // Remove the previous value for the mux
+    regval |= fn_val;       // Assign the new value to the mux
+    writel(regval, reg);
+
+    mtx_unlock(&block->lock);
 
     return ZX_OK;
 }
@@ -205,6 +207,7 @@ void aml_gpio_release(aml_gpio_t* gpio) {
 
 static gpio_protocol_ops_t gpio_ops = {
     .config = aml_gpio_config,
+    .set_alt_function = aml_gpio_set_alt_function,
     .read = aml_gpio_read,
     .write = aml_gpio_write,
 };
