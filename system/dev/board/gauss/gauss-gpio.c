@@ -21,166 +21,27 @@
 #define GPIOAO_BASE_PHYS 0xff800000
 #define GPIOAO_BASE_PAGE ((~PAGE_MASK) & GPIOAO_BASE_PHYS)
 
-/*
-static aml_gpio_block_t gpio_blocks[] = {
-    // GPIO X Block
-    {
-        .start_pin = (A113_GPIOX_START + 0),
-        .pin_block = A113_GPIOX_START,
-        .pin_count = 8,
-        .mux_offset = PERIPHS_PIN_MUX_4,
-        .ctrl_offset = GPIO_REG2_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-    {
-        .start_pin = (A113_GPIOX_START + 8),
-        .pin_block = A113_GPIOX_START,
-        .pin_count = 8,
-        .mux_offset = PERIPHS_PIN_MUX_5,
-        .ctrl_offset = GPIO_REG2_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-    {
-        .start_pin = (A113_GPIOX_START + 16),
-        .pin_block = A113_GPIOX_START,
-        .pin_count = 7,
-        .mux_offset = PERIPHS_PIN_MUX_6,
-        .ctrl_offset = GPIO_REG2_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-
-    // GPIO A Block
-    {
-        .start_pin = (A113_GPIOA_START + 0),
-        .pin_block = A113_GPIOA_START,
-        .pin_count = 8,
-        .mux_offset = PERIPHS_PIN_MUX_B,
-        .ctrl_offset = GPIO_REG0_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-    {
-        .start_pin = (A113_GPIOA_START + 8),
-        .pin_block = A113_GPIOA_START,
-        .pin_count = 8,
-        .mux_offset = PERIPHS_PIN_MUX_C,
-        .ctrl_offset = GPIO_REG0_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-    {
-        .start_pin = (A113_GPIOA_START + 16),
-        .pin_block = A113_GPIOA_START,
-        .pin_count = 5,
-        .mux_offset = PERIPHS_PIN_MUX_D,
-        .ctrl_offset = GPIO_REG0_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-
-    // GPIO Boot Block
-    {
-        .start_pin = (A113_GPIOB_START + 0),
-        .pin_block = A113_GPIOB_START,
-        .pin_count = 8,
-        .mux_offset = PERIPHS_PIN_MUX_0,
-        .ctrl_offset = GPIO_REG4_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-    {
-        .start_pin = (A113_GPIOB_START + 8),
-        .pin_block = A113_GPIOB_START,
-        .pin_count = 7,
-        .mux_offset = PERIPHS_PIN_MUX_1,
-        .ctrl_offset = GPIO_REG4_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-
-    // GPIO Y Block
-    {
-        .start_pin = (A113_GPIOY_START + 0),
-        .pin_block = A113_GPIOY_START,
-        .pin_count = 8,
-        .mux_offset = PERIPHS_PIN_MUX_8,
-        .ctrl_offset = GPIO_REG1_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-    {
-        .start_pin = (A113_GPIOY_START + 8),
-        .pin_block = A113_GPIOY_START,
-        .pin_count = 8,
-        .mux_offset = PERIPHS_PIN_MUX_9,
-        .ctrl_offset = GPIO_REG1_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-
-    // GPIO Z Block
-    {
-        .start_pin = (A113_GPIOZ_START + 0),
-        .pin_block = A113_GPIOZ_START,
-        .pin_count = 8,
-        .mux_offset = PERIPHS_PIN_MUX_2,
-        .ctrl_offset = GPIO_REG3_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-    {
-        .start_pin = (A113_GPIOZ_START + 8),
-        .pin_block = A113_GPIOZ_START,
-        .pin_count = 3,
-        .mux_offset = PERIPHS_PIN_MUX_3,
-        .ctrl_offset = GPIO_REG3_EN_N,
-        .ctrl_block_base_phys = GPIO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-
-    // GPIO AO Block
-    // NOTE: The GPIO AO block has a seperate control block than the other
-    //       GPIO blocks.
-    {
-        .start_pin = (A113_GPIOAO_START + 0),
-        .pin_block = A113_GPIOAO_START,
-        .pin_count = 8,
-        .mux_offset = AO_RTI_PIN_MUX_REG0,
-        .ctrl_offset = AO_GPIO_O_EN_N,
-        .ctrl_block_base_phys = GPIOAO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-    {
-        .start_pin = (A113_GPIOAO_START + 8),
-        .pin_block = A113_GPIOAO_START,
-        .pin_count = 6,
-        .mux_offset = AO_RTI_PIN_MUX_REG1,
-        .ctrl_offset = AO_GPIO_O_EN_N,
-        .ctrl_block_base_phys = GPIOAO_BASE_PAGE,
-        .lock = MTX_INIT,
-    },
-};
-
-*/
-
 static const pbus_mmio_t gpio_mmios[] = {
-/*
     {
-        .base = DWC3_MMIO_BASE,
+        .base = ROUNDDOWN(GPIO_BASE_PAGE, PAGE_SIZE),
+        .offset = GPIO_BASE_PAGE & (PAGE_SIZE - 1),
         .length = DWC3_MMIO_LENGTH,
     },
-*/
+    {
+        .base = GPIOAO_BASE_PAGE,
+        .length = DWC3_MMIO_LENGTH,
+    },
 };
 
 static const pbus_irq_t gpio_irqs[] = {
-/*
-    {
-        .irq = DWC3_IRQ,
-    },
-*/
+    { .irq = 64, },
+    { .irq = 65, },
+    { .irq = 66, },
+    { .irq = 67, },
+    { .irq = 68, },
+    { .irq = 69, },
+    { .irq = 70, },
+    { .irq = 71, },
 };
 
 static const pbus_dev_t gpio_dev = {
