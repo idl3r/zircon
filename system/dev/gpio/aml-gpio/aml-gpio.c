@@ -6,16 +6,36 @@
 #include <threads.h>
 
 #include <bits/limits.h>
+#include <ddk/binding.h>
 #include <ddk/debug.h>
+#include <ddk/device.h>
+#include <ddk/protocol/gpio.h>
+#include <ddk/protocol/platform-defs.h>
+#include <ddk/protocol/platform-device.h>
 #include <hw/reg.h>
 
 #include <zircon/assert.h>
 #include <zircon/types.h>
 
-#include <soc/aml-common/aml-gpio.h>
 #include <soc/aml-a113/a113-hw.h>
 
-#define PAGE_START(a) ((~(PAGE_SIZE - 1)) & (a))
+typedef struct {
+    uint32_t start_pin;
+    uint32_t pin_block;
+    uint32_t pin_count;
+    uint32_t mux_offset;
+    uint32_t ctrl_offset;
+    void* ctrl_block_base_virt;
+    uint32_t mmio_index;
+    mtx_t lock;
+} aml_gpio_block_t;
+
+typedef struct {
+    platform_device_protocol_t pdev;
+    gpio_protocol_t proto;
+    zx_device_t* zxdev;
+    pdev_vmo_buffer_t mmios[2];    // separate MMIO for AO domain
+} aml_gpio_t;
 
 static aml_gpio_block_t gpio_blocks[] = {
     // GPIO X Block
@@ -25,7 +45,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 8,
         .mux_offset = PERIPHS_PIN_MUX_4,
         .ctrl_offset = GPIO_REG2_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
     {
@@ -34,7 +54,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 8,
         .mux_offset = PERIPHS_PIN_MUX_5,
         .ctrl_offset = GPIO_REG2_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
     {
@@ -43,7 +63,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 7,
         .mux_offset = PERIPHS_PIN_MUX_6,
         .ctrl_offset = GPIO_REG2_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
 
@@ -54,7 +74,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 8,
         .mux_offset = PERIPHS_PIN_MUX_B,
         .ctrl_offset = GPIO_REG0_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
     {
@@ -63,7 +83,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 8,
         .mux_offset = PERIPHS_PIN_MUX_C,
         .ctrl_offset = GPIO_REG0_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
     {
@@ -72,7 +92,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 5,
         .mux_offset = PERIPHS_PIN_MUX_D,
         .ctrl_offset = GPIO_REG0_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
 
@@ -83,7 +103,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 8,
         .mux_offset = PERIPHS_PIN_MUX_0,
         .ctrl_offset = GPIO_REG4_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
     {
@@ -92,7 +112,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 7,
         .mux_offset = PERIPHS_PIN_MUX_1,
         .ctrl_offset = GPIO_REG4_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
 
@@ -103,7 +123,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 8,
         .mux_offset = PERIPHS_PIN_MUX_8,
         .ctrl_offset = GPIO_REG1_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
     {
@@ -112,7 +132,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 8,
         .mux_offset = PERIPHS_PIN_MUX_9,
         .ctrl_offset = GPIO_REG1_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
 
@@ -123,7 +143,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 8,
         .mux_offset = PERIPHS_PIN_MUX_2,
         .ctrl_offset = GPIO_REG3_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
     {
@@ -132,7 +152,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 3,
         .mux_offset = PERIPHS_PIN_MUX_3,
         .ctrl_offset = GPIO_REG3_EN_N,
-//        .ctrl_block_base_phys = GPIO_BASE_PAGE,
+        .mmio_index = 0,
         .lock = MTX_INIT,
     },
 
@@ -145,7 +165,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 8,
         .mux_offset = AO_RTI_PIN_MUX_REG0,
         .ctrl_offset = AO_GPIO_O_EN_N,
-//        .ctrl_block_base_phys = GPIOAO_BASE_PAGE,
+        .mmio_index = 1,
         .lock = MTX_INIT,
     },
     {
@@ -154,7 +174,7 @@ static aml_gpio_block_t gpio_blocks[] = {
         .pin_count = 6,
         .mux_offset = AO_RTI_PIN_MUX_REG1,
         .ctrl_offset = AO_GPIO_O_EN_N,
-//        .ctrl_block_base_phys = GPIOAO_BASE_PAGE,
+        .mmio_index = 1,
         .lock = MTX_INIT,
     },
 };
@@ -162,8 +182,8 @@ static aml_gpio_block_t gpio_blocks[] = {
 static zx_status_t aml_pin_to_block(aml_gpio_t* gpio, const uint32_t pinid, aml_gpio_block_t** result) {
     ZX_DEBUG_ASSERT(result);
 
-    for (size_t i = 0; i < gpio->gpio_block_count; i++) {
-        aml_gpio_block_t* gpio_block = &gpio->gpio_blocks[i];
+    for (size_t i = 0; i < countof(gpio_blocks); i++) {
+        aml_gpio_block_t* gpio_block = &gpio_blocks[i];
         const uint32_t end_pin = gpio_block->start_pin + gpio_block->pin_count;
         if (pinid >= gpio_block->start_pin && pinid < end_pin) {
             *result = gpio_block;
@@ -341,18 +361,29 @@ static zx_status_t aml_gpio_write(void* ctx, uint32_t index, uint8_t value) {
     return ZX_OK;
 }
 
-
-void aml_gpio_release(aml_gpio_t* gpio) {
-    io_buffer_release(&gpio->periphs_ao_reg);
-    io_buffer_release(&gpio->periphs_reg);
-}
-
 static gpio_protocol_ops_t gpio_ops = {
     .config = aml_gpio_config,
     .set_alt_function = aml_gpio_set_alt_function,
     .read = aml_gpio_read,
     .write = aml_gpio_write,
 };
+
+static void aml_gpio_release(void* ctx) {
+    aml_gpio_t* gpio = ctx;
+    for (unsigned i = 0; i < countof(gpio->mmios); i++) {
+        pdev_vmo_buffer_release(&gpio->mmios[i]);
+    }
+    free(gpio);
+}
+
+
+static zx_protocol_device_t gpio_device_proto = {
+    .version = DEVICE_OPS_VERSION,
+    .release = aml_gpio_release,
+};
+
+/*
+#define PAGE_START(a) ((~(PAGE_SIZE - 1)) & (a))
 
 zx_status_t aml_gpio_init(aml_gpio_t* gpio, zx_paddr_t gpio_base, zx_paddr_t a0_base,
                           aml_gpio_block_t* gpio_blocks, size_t gpio_block_count) {
@@ -414,10 +445,6 @@ zx_status_t aml_gpio_init(aml_gpio_t* gpio, zx_paddr_t gpio_base, zx_paddr_t a0_
         }
     }
 
-    // Copy the protocol into the aml gpio struct.
-    gpio->proto.ops = &gpio_ops;
-    gpio->proto.ctx = gpio;
-
     return ZX_OK;
 
 cleanup_and_fail:
@@ -425,3 +452,66 @@ cleanup_and_fail:
     io_buffer_release(&gpio->periphs_reg);
     return status;
 }
+*/
+
+
+static zx_status_t aml_gpio_bind(void* ctx, zx_device_t* parent) {
+    zx_status_t status;
+
+    aml_gpio_t* gpio = calloc(1, sizeof(aml_gpio_t));
+    if (!gpio) {
+        return ZX_ERR_NO_MEMORY;
+    }
+
+    if ((status = device_get_protocol(parent, ZX_PROTOCOL_PLATFORM_DEV, &gpio->pdev)) != ZX_OK) {
+        goto fail;
+    }
+
+    for (unsigned i = 0; i < countof(gpio->mmios); i++) {
+        status = pdev_map_mmio_buffer(&gpio->pdev, 0, ZX_CACHE_POLICY_UNCACHED_DEVICE,
+                                      &gpio->mmios[i]);
+        if (status != ZX_OK) {
+            zxlogf(ERROR, "dwc3_bind: pdev_map_mmio_buffer failed\n");
+            goto fail;
+        }
+    }
+
+    // Initialize each of the GPIO Pin blocks.
+    for (size_t i = 0; i < countof(gpio_blocks); i++) {
+        aml_gpio_block_t* block = &gpio_blocks[i];
+        block->ctrl_block_base_virt = gpio->mmios[block->mmio_index].vaddr;
+    }
+
+    device_add_args_t args = {
+        .version = DEVICE_ADD_ARGS_VERSION,
+        .name = "aml-gpio",
+        .ctx = gpio,
+        .ops = &gpio_device_proto,
+        .proto_id = ZX_PROTOCOL_GPIO,
+        .proto_ops = &gpio_ops,
+    };
+
+    status = device_add(parent, &args, &gpio->zxdev);
+    if (status != ZX_OK) {
+        goto fail;
+    }
+
+    return ZX_OK;
+
+fail:
+    zxlogf(ERROR, "aml_gpio_bind failed %d\n", status);
+    aml_gpio_release(gpio);
+    return status;
+}
+
+static zx_driver_ops_t aml_gpio_driver_ops = {
+    .version = DRIVER_OPS_VERSION,
+    .bind = aml_gpio_bind,
+};
+
+ZIRCON_DRIVER_BEGIN(aml_gpio, aml_gpio_driver_ops, "zircon", "0.1", 4)
+    BI_ABORT_IF(NE, BIND_PROTOCOL, ZX_PROTOCOL_PLATFORM_DEV),
+    BI_ABORT_IF(NE, BIND_PLATFORM_DEV_VID, PDEV_VID_AMLOGIC),
+    BI_ABORT_IF(NE, BIND_PLATFORM_DEV_PID, PDEV_PID_GENERIC),
+    BI_MATCH_IF(EQ, BIND_PLATFORM_DEV_DID, PDEV_DID_AMLOGIC_GPIO),
+ZIRCON_DRIVER_END(aml_gpio)
